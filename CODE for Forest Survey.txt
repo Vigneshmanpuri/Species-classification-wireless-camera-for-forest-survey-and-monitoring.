@@ -1,0 +1,166 @@
+import cv2
+import numpy as np
+import time
+import requests
+from PIL import ImageFont, ImageDraw, Image
+
+current_time = 0
+previous_time = 0
+fps = 0
+
+last_alert_time = time.time() - 10
+
+chat_id = "-4737596449"                    # Wild Life Conservation Dept
+
+knife_x = 0
+knife_y = 0
+knife_width = 0
+knife_height = 0
+knife_detected = False
+
+
+def insert_text(image, text, pos, RGB_Colour, size):
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray((image * 1).astype(np.uint8))  # (img * 1).astype(np.uint8)).convert('RGB')
+
+    text_font = ImageFont.truetype("calibri.ttf", size)
+    draw = ImageDraw.Draw(pil_image)
+    draw.text(pos, text, font=text_font, fill=RGB_Colour)
+    image = np.asarray(pil_image)
+    img_copy = np.copy(image)
+    # image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    return img_copy
+
+
+def send_telegram_photo(photo_path, caption, chat_id_num):
+    api_token = "7307939493:AAFvCoWgqRHoliH3-enxh6l77vlMDQieym4"
+    url = f"https://api.telegram.org/bot{api_token}/sendPhoto"
+    files = {'photo': open(photo_path, 'rb')}
+    data = {'chat_id': chat_id, 'caption': caption}
+
+    try:
+        requests.post(url, files=files, data=data)
+    except requests.exceptions.RequestException as es:
+        print(f"Request error encountered: {es}. Retrying in 60 seconds...")
+        time.sleep(60)
+
+
+# Load YOLO
+net = cv2.dnn.readNet("yolov4-tiny.weights", "yolov4-tiny.cfg")
+layer_names = net.getLayerNames()
+output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+
+# Load class names
+with open("coco.names", "r") as f:
+    classes = [line.strip() for line in f.readlines()]
+
+# Load video
+# video_path = './test.mp4'
+cap = cv2.VideoCapture(0)
+# cap.set(10, 70)
+
+# Check if video opened successfully
+if not cap.isOpened():
+    print("Error: Could not open video.")
+    exit()
+
+while cap.isOpened():
+    current_time = time.time()
+    fps = int(1 / (current_time - previous_time))
+    previous_time = current_time
+
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    height, width, channels = frame.shape
+
+    # Prepare the image for the model
+    blob = cv2.dnn.blobFromImage(frame, 0.00392, (411, 411), (0, 0, 0), True, crop=False)
+    net.setInput(blob)
+    outs = net.forward(output_layers)
+    knife_detected = False
+    animals_detected = []
+    animals_names = set()
+
+    for out in outs:
+        for detection in out:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if confidence > 0.5 and (classes[class_id] == "elephant" or classes[class_id] == "zebra" or classes[class_id] == "giraffe"):
+                # Animal detected
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                animal_width = int(detection[2] * width)
+                animal_height = int(detection[3] * height)
+
+                animal_x = int(center_x - animal_width / 2)
+                animal_y = int(center_y - animal_height / 2)
+                animal_name = classes[class_id]
+
+                animal_data = {
+                    "name": animal_name,
+                    "x_pos": animal_x,
+                    "y_pos": animal_y,
+                    "width": animal_width,
+                    "height": animal_height
+                }
+
+                if animal_name not in animals_names:
+                    animals_detected.append(animal_data)
+                    animals_names.add(animal_name)
+
+            if confidence > 0.5 and classes[class_id] == "knife":
+                # Knife detected
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                knife_width = int(detection[2] * width)
+                knife_height = int(detection[3] * height)
+
+                knife_x = int(center_x - knife_width / 2)
+                knife_y = int(center_y - knife_height / 2)
+                knife_detected = True
+
+    if animals_detected:
+        # print(f"Len: {len(animals_detected)}, {animals_detected}")
+        for animal_data in animals_detected:
+            animal_name = animal_data["name"]
+            animal_x = animal_data["x_pos"]
+            animal_y = animal_data["y_pos"]
+            animal_width = animal_data["width"]
+            animal_height = animal_data["height"]
+
+            # Draw bounding box and label For The Current Animal In the List
+            frame = insert_text(frame, animal_name.capitalize(), (animal_x, animal_y - 30), (0, 255, 0), 30)
+            cv2.rectangle(frame, (animal_x, animal_y), (animal_x + animal_width, animal_y + animal_height), (0, 255, 0), 2)
+
+    if knife_detected:
+        # Draw bounding box and label For The Knife
+        frame = insert_text(frame, "KNIFE", (knife_x, knife_y - 30), (0, 255, 0), 30)
+        cv2.rectangle(frame, (knife_x, knife_y), (knife_x + knife_width, knife_y + knife_height), (0, 255, 0), 2)
+
+        if animals_detected:
+            caption = ""
+            if len(animals_names) == 1:
+                caption = f"{animals_detected[0]['name'].capitalize()} Is In Danger"
+            elif len(animals_detected) > 1:
+                temp_names = ", ".join(name.capitalize() for name in animals_names)
+                caption = f"{temp_names} Are In Danger"
+
+            if time.time() > last_alert_time + 10:
+                cv2.imwrite("img_to_send.png", frame)
+                time.sleep(0.01)
+                send_telegram_photo("img_to_send.png", f"{caption}", chat_id)
+                last_alert_time = time.time()
+
+    # Display the resulting frame
+    frame = insert_text(frame, f"FPS: {fps}", (15, 15), (255, 0, 0), 24)
+    cv2.imshow('frame', frame)
+
+    if cv2.waitKey(25) & 0xFF == ord('q'):
+        break
+
+# Release the capture and close windows
+cap.release()
+cv2.destroyAllWindows()
